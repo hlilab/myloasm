@@ -872,15 +872,21 @@ fn light_progressive_cleaning(
         let prebridge_file = temp_dir.join(format!("{}-pre_bridge_cuts.txt", iteration));
         let edge_safe_cov_threshold = safety_edge_cov_score_thresholds
             [(iteration - 1).min(safety_edge_cov_score_thresholds.len() - 1)];
+        // EXPERIMENT: for early iterations (low ol_thresh), bypass Conditions 4/5
+        // (tip-safety checks) in safely_cut_edge -- treat them as always safe, so only
+        // the overlap-ratio/coverage-ratio gate (Condition 2) decides whether to cut.
+        let ol_thresh_iter = max_dropcut_thresh / (divider as f64) * iteration as f64;
+        let skip_tip_safety_this_iter = ol_thresh_iter < 0.35;
         unitig_graph.resolve_bridged_repeats(
             &args,
-            max_dropcut_thresh / (divider as f64) * iteration as f64,
+            ol_thresh_iter,
             None,
             Some(edge_safe_cov_threshold),
             prebridge_file,
             FORWARD_READ_SAFE_SEARCH_CUTOFF,
             args.tip_read_cutoff,
             100_000,
+            skip_tip_safety_this_iter,
         );
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
         if output_temp {
@@ -1431,6 +1437,7 @@ fn _heavy_cleaning(
             args.tip_length_cutoff * 5,
             args.tip_read_cutoff * 5,
             300_000,
+            false,
         );
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
         unitig_graph.to_gfa(

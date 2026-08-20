@@ -2141,6 +2141,7 @@ impl UnitigGraph {
         max_forward: usize,
         max_reads_forward: usize,
         safe_length_back: usize,
+        skip_tip_safety: bool,
     ) where
         T: AsRef<std::path::Path>,
     {
@@ -2181,6 +2182,7 @@ impl UnitigGraph {
                     safety_cov_edge_ratio,
                     None,
                     true,
+                    skip_tip_safety,
                     max_forward,
                     max_reads_forward,
                     safe_length_back,
@@ -2210,6 +2212,7 @@ impl UnitigGraph {
                         safety_cov_edge_ratio,
                         None,
                         false,
+                        skip_tip_safety,
                         max_forward,
                         max_reads_forward,
                         safe_length_back,
@@ -2643,6 +2646,7 @@ impl UnitigGraph {
                 None,
                 None,
                 false,
+                false,
                 FORWARD_READ_SAFE_SEARCH_CUTOFF,
                 args.tip_length_cutoff,
                 50_000,
@@ -2665,6 +2669,7 @@ impl UnitigGraph {
         safety_cov_edge_ratio: Option<f64>,
         strain_repeat_map: Option<&FxHashMap<NodeIndex, FxHashSet<NodeIndex>>>,
         snpmer_id_est_safety: bool,
+        skip_tip_safety: bool,
         max_forward: usize,
         max_reads_forward: usize,
         safe_length_back: usize,
@@ -2776,49 +2781,57 @@ impl UnitigGraph {
 
             // ----- CONDITION 4 ----- (Not self-tipping condition)
             // If we cut this edge, the "current" unitig must not be a tip.
-            let mut forward_search_forbidden_nodes = FxHashSet::default();
-            forward_search_forbidden_nodes.insert(unitig.node_hash_id);
-            forward_search_forbidden_nodes.insert(edge.other_node(unitig.node_hash_id));
-            let mut safe_if_cut = if args.dfs_back_search {
-                self.search_dir_until_safe_v2(
-                    unitig,
-                    direction,
-                    safe_length_back,
-                    safety_cov_edge_ratio,
-                    &forward_search_forbidden_nodes,
-                    removed_edges,
-                    Some((unitig, edge)),
-                )
+            let safe_if_cut = if skip_tip_safety {
+                true
             } else {
-                self.search_dir_until_safe(
-                    unitig,
-                    direction,
-                    safe_length_back,
-                    safety_cov_edge_ratio,
-                    &forward_search_forbidden_nodes,
-                    removed_edges,
-                    Some((unitig, edge)),
-                )
-            };
-            //log::debug!("Condition 4 took {:?}", t4.elapsed());
+                let forward_search_forbidden_nodes: FxHashSet<NodeIndex> = {
+                    let mut s = FxHashSet::default();
+                    s.insert(unitig.node_hash_id);
+                    s.insert(edge.other_node(unitig.node_hash_id));
+                    s
+                };
+                let mut safe_if_cut = if args.dfs_back_search {
+                    self.search_dir_until_safe_v2(
+                        unitig,
+                        direction,
+                        safe_length_back,
+                        safety_cov_edge_ratio,
+                        &forward_search_forbidden_nodes,
+                        removed_edges,
+                        Some((unitig, edge)),
+                    )
+                } else {
+                    self.search_dir_until_safe(
+                        unitig,
+                        direction,
+                        safe_length_back,
+                        safety_cov_edge_ratio,
+                        &forward_search_forbidden_nodes,
+                        removed_edges,
+                        Some((unitig, edge)),
+                    )
+                };
+                //log::debug!("Condition 4 took {:?}", t4.elapsed());
 
-            // ----- CONDITION 4.5 ----- (Small circularity condition)
-            // The above condition can fail for small circular unitigs (< safe_length_back)
-            // when the current unitig is circular after cutting the edge. Amend this.
-            if !safe_if_cut {
-                for edge_id_check in non_cut_edges.iter() {
-                    if edge_id_check == &edge_id {
-                        continue;
-                    }
-                    let edge = self.edges[*edge_id_check].as_ref().unwrap();
-                    if edge.from_unitig == edge.to_unitig {
-                        safe_if_cut = true;
-                        break;
+                // ----- CONDITION 4.5 ----- (Small circularity condition)
+                // The above condition can fail for small circular unitigs (< safe_length_back)
+                // when the current unitig is circular after cutting the edge. Amend this.
+                if !safe_if_cut {
+                    for edge_id_check in non_cut_edges.iter() {
+                        if edge_id_check == &edge_id {
+                            continue;
+                        }
+                        let edge = self.edges[*edge_id_check].as_ref().unwrap();
+                        if edge.from_unitig == edge.to_unitig {
+                            safe_if_cut = true;
+                            break;
+                        }
                     }
                 }
-            }
 
-            drop(forward_search_forbidden_nodes);
+                drop(forward_search_forbidden_nodes);
+                safe_if_cut
+            };
 
             if !safe_if_cut && !strain_repeat_safe {
                 writeln!(
@@ -2832,16 +2845,20 @@ impl UnitigGraph {
 
             // ----- CONDITION 5 ----- (Forward and back search condition)
             // Main search criteria. If the edge is cut, the downstream unitig (not current unitig) is not a "tip".
-            let safe = self.safe_given_forward_back(
-                unitig,
-                edge,
-                max_forward,
-                max_reads_forward,
-                safe_length_back,
-                safety_cov_edge_ratio,
-                removed_edges,
-                args.dfs_back_search,
-            );
+            let safe = if skip_tip_safety {
+                true
+            } else {
+                self.safe_given_forward_back(
+                    unitig,
+                    edge,
+                    max_forward,
+                    max_reads_forward,
+                    safe_length_back,
+                    safety_cov_edge_ratio,
+                    removed_edges,
+                    args.dfs_back_search,
+                )
+            };
             //log::debug!("Condition 5 took {:?}", t5.elapsed());
 
             let mut is_cut = false;
@@ -3200,6 +3217,7 @@ impl UnitigGraph {
                         None,
                         None,
                         options.strain_repeat_map,
+                        false,
                         false,
                         max_forward_adj,
                         max_reads_forward_adj,
@@ -4357,6 +4375,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    false,
                     2000,
                     5,
                     1000,
@@ -4400,6 +4419,7 @@ mod tests {
                     None,
                     None,
                     true,
+                    false,
                     2000,
                     5,
                     1000,
@@ -4418,6 +4438,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    false,
                     false,
                     2000,
                     5,
@@ -4464,6 +4485,7 @@ mod tests {
                     None,
                     None,
                     true,
+                    false,
                     2000,
                     5,
                     1000,
@@ -4510,6 +4532,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    false,
                     2000,
                     5,
                     1000,
@@ -4532,6 +4555,7 @@ mod tests {
                     Some(3.),
                     None,
                     None,
+                    false,
                     false,
                     2000,
                     5,
@@ -4581,6 +4605,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    false,
                     2000,
                     5,
                     2000,
@@ -4591,6 +4616,79 @@ mod tests {
             }
             dbg!(&*removed_edges.borrow());
             assert!(!removed_edges.borrow().contains(&2));
+        });
+    }
+
+    #[test]
+    fn safely_cut_edge_test_skip_tip_safety_allows_cut() {
+        // Reported experiment scenario: a strong edge to a node that's otherwise fine, and a
+        // weak edge into a long, unbranched downstream chain. Conditions 4/5 currently block
+        // cutting the weak edge because its downstream side looks like a long, un-backed path
+        // that would be orphaned -- even though the weak edge is the one we actually want to
+        // prune (e.g. a spurious/repeat-induced junction).
+        //
+        // n1 --(9000)--> n2
+        // n1 --(1000)--> n3 --(10000)--> n4 (long, unbranched)
+        for_both_versions(|args| {
+            let mut builder = MockUnitigBuilder::new();
+            let n1 = builder.add_node(100, 10.0);
+            let n2 = builder.add_node(100, 10.0);
+            let n3 = builder.add_node(100, 10.0);
+            let n4 = builder.add_node(100, 10.0);
+
+            builder.add_edge(n1, n2, 9000, true, true);
+            let weak_edge = builder.add_edge(n1, n3, 1000, true, true);
+            builder.add_edge(n3, n4, 10000, true, true);
+
+            let (graph, _reads) = builder.build();
+
+            // Without skip_tip_safety: Condition 5 blocks the cut, since n3->n4 is a long,
+            // unbranched, un-backed downstream chain that would be orphaned.
+            {
+                let removed_edges = RefCell::new(FxHashSet::<EdgeIndex>::default());
+                let mut unitig_edge_file = BufWriter::new(std::io::sink());
+                graph.safely_cut_edge(
+                    weak_edge,
+                    &removed_edges,
+                    0.5, // ol_thresh: 1000/9000 < 0.5, so it's a Condition-2 candidate
+                    None,
+                    None,
+                    None,
+                    false,
+                    false, // skip_tip_safety = false
+                    2000,  // max_forward
+                    5,     // max_reads_forward
+                    2000,  // safe_length_back
+                    &mut unitig_edge_file,
+                    9,
+                    &args,
+                );
+                assert!(!removed_edges.borrow().contains(&weak_edge));
+            }
+
+            // With skip_tip_safety = true: Conditions 4/5 are bypassed (always safe), so the
+            // weak edge is cut based on Condition 2 (overlap ratio) alone.
+            {
+                let removed_edges = RefCell::new(FxHashSet::<EdgeIndex>::default());
+                let mut unitig_edge_file = BufWriter::new(std::io::sink());
+                graph.safely_cut_edge(
+                    weak_edge,
+                    &removed_edges,
+                    0.5,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true, // skip_tip_safety = true
+                    2000,
+                    5,
+                    2000,
+                    &mut unitig_edge_file,
+                    9,
+                    &args,
+                );
+                assert!(removed_edges.borrow().contains(&weak_edge));
+            }
         });
     }
 
@@ -4621,6 +4719,7 @@ mod tests {
                     Some(3.),
                     None,
                     None,
+                    false,
                     false,
                     2000,
                     5,
@@ -4667,6 +4766,7 @@ mod tests {
                     Some(3.),
                     None,
                     None,
+                    false,
                     false,
                     20000,
                     20,
@@ -4731,6 +4831,7 @@ mod tests {
                     None,
                     None,
                     Some(&strain_repeat_map),
+                    false,
                     false,
                     2000,
                     5,
@@ -5451,6 +5552,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    false,
                     false,
                     100_000,
                     20,
