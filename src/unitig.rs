@@ -757,6 +757,11 @@ impl UnitigGraph {
         let mut gfa = String::new();
         // Header
         gfa.push_str("H\tVN:Z:1.0\n");
+        gfa.push_str(
+            "# Myloasm L tags: ol:i=overlap length (bp), sd:i=different SNPmers, \
+ss:i=shared SNPmers, sm:i=shared minimizers, fs:f=FSV identity (%), \
+r1:Z=read for first contig, r2:Z=read for second contig\n",
+        );
 
         // Segments
         for (_id, unitig) in self.nodes.iter_mut() {
@@ -846,6 +851,8 @@ impl UnitigGraph {
             let to_orient = if edge.f2 { "+" } else { "-" };
             let id1 = self.nodes[&edge.from_unitig].read_indices_ori[0].0;
             let id2 = self.nodes[&edge.to_unitig].read_indices_ori[0].0;
+            let read1_id = first_word(&reads[edge.from_read_idx].id);
+            let read2_id = first_word(&reads[edge.to_read_idx].id);
             writeln!(
                 edgewriter,
                 "u{}ctg {} u{}ctg {} OL:{} SNP_SHARE:{} SNP_DIFF:{} READ1: {} {} READ2:{} {}",
@@ -863,14 +870,28 @@ impl UnitigGraph {
             )
             .unwrap();
 
+            let fsv_percent = edge.edge_id_est(args.c) * 100.;
+            let fsv_tag = if fsv_percent.is_finite() {
+                format!("\tfs:f:{:.3}", fsv_percent)
+            } else {
+                String::new()
+            };
+
             gfa.push_str(&format!(
-                "L\tu{}ctg\t{}\tu{}ctg\t{}\t{}M\n",
+                "L\tu{}ctg\t{}\tu{}ctg\t{}\t{}M\tol:i:{}\tsd:i:{}\tss:i:{}\tsm:i:{}{}\tr1:Z:{}\tr2:Z:{}\n",
                 id1,
                 from_orient,
                 id2,
                 to_orient,
                 //edge.overlap.overlap_len_bases
-                0
+                0,
+                edge.overlap.overlap_len_bases,
+                edge.overlap.diff_snpmers,
+                edge.overlap.shared_snpmers,
+                edge.overlap.shared_minimizers,
+                fsv_tag,
+                read1_id,
+                read2_id,
             ));
         }
 
@@ -1082,7 +1103,80 @@ impl UnitigGraph {
         self.remove_nodes(&unitigs_to_remove, true);
     }
 
-    fn remove_tips_internal(&mut self, length: usize, num_reads: usize, keep: bool) {
+    fn preserve_competitive_tip(&self, tip_node_id: NodeIndex, c: usize) -> bool {
+        let tip = &self.nodes[&tip_node_id];
+        let tip_edge_ids = if tip.in_edges.is_empty() {
+            &tip.out_edges
+        } else if tip.out_edges.is_empty() {
+            &tip.in_edges
+        } else {
+            return false;
+        };
+
+        let Some(max_tip_overlap) = tip_edge_ids
+            .iter()
+            .filter_map(|edge_id| self.edges[*edge_id].as_ref())
+            .map(|edge| edge.overlap.overlap_len_bases)
+            .max()
+        else {
+            return false;
+        };
+
+        // If multiple tip edges have the same maximum overlap, use the best FSV
+        // among them rather than relying on their order in the adjacency vector.
+        let max_tip_fsv = tip_edge_ids
+            .iter()
+            .filter_map(|edge_id| self.edges[*edge_id].as_ref())
+            .filter(|edge| edge.overlap.overlap_len_bases == max_tip_overlap)
+            .map(|edge| edge.edge_id_est(c))
+            .filter(|fsv| fsv.is_finite())
+            .max_by(|a, b| a.total_cmp(b));
+        let Some(max_tip_fsv) = max_tip_fsv else {
+            return false;
+        };
+
+        let tip_edge_ids = tip_edge_ids.iter().copied().collect::<FxHashSet<_>>();
+        let mut competing_edge_ids = FxHashSet::default();
+
+        for tip_edge_id in &tip_edge_ids {
+            let Some(tip_edge) = self.edges[*tip_edge_id].as_ref() else {
+                continue;
+            };
+            let adjacent_node_id = tip_edge.other_node(tip_node_id);
+            let adjacent_direction = tip_edge.node_edge_direction(&adjacent_node_id);
+            for competing_edge_id in
+                self.nodes[&adjacent_node_id].edges_direction(&adjacent_direction)
+            {
+                if !tip_edge_ids.contains(competing_edge_id) {
+                    competing_edge_ids.insert(*competing_edge_id);
+                }
+            }
+        }
+
+        // A terminal edge without an alternative at its adjacent node remains
+        // subject to the existing length/read-count tip removal behavior.
+        if competing_edge_ids.is_empty() {
+            return false;
+        }
+
+        let mut max_competing_overlap = 0;
+        for competing_edge_id in competing_edge_ids {
+            let Some(competing_edge) = self.edges[competing_edge_id].as_ref() else {
+                continue;
+            };
+            max_competing_overlap =
+                max_competing_overlap.max(competing_edge.overlap.overlap_len_bases);
+
+            let competing_fsv = competing_edge.edge_id_est(c);
+            if !competing_fsv.is_finite() || max_tip_fsv < competing_fsv {
+                continue;
+            }
+        }
+
+        max_tip_overlap as u128 > (max_competing_overlap as u128) * 3
+    }
+
+    fn remove_tips_internal(&mut self, length: usize, num_reads: usize, keep: bool, c: usize) {
         let node_to_sizeread_map = self.get_all_connected_components(false);
         let mut unitigs_to_remove = Vec::new();
         let mut debug_ids = vec![];
@@ -1107,6 +1201,15 @@ impl UnitigGraph {
                 if unitig.unique_length.unwrap() <= length.min(bp_size_cc / 10)
                     || unitig.read_indices_ori.len() <= num_reads.min(reads_in_cc / 10)
                 {
+                    // Competitive-tip preservation is disabled: benchmarking showed it
+                    // costs more than it gains once combined with the other cleaning changes.
+                    if false && self.preserve_competitive_tip(dead_end_ind, c) {
+                        log::trace!(
+                            "Preserving competitive tip {}",
+                            unitig.read_indices_ori[0].0
+                        );
+                        continue;
+                    }
                     //println!("Unitig {} is a dead end; unique_length {}, bp_size_cc {}, reads_in_cc {}", unitig.read_indices_ori[0].0, unitig.unique_length.unwrap(), bp_size_cc, reads_in_cc);
                     unitigs_to_remove.push(dead_end_ind);
                     debug_ids.push(unitig.read_indices_ori[0].0);
@@ -1124,8 +1227,8 @@ impl UnitigGraph {
         self.re_unitig();
     }
 
-    pub fn remove_tips(&mut self, length: usize, num_reads: usize, keep: bool) {
-        self.remove_tips_internal(length, num_reads, keep);
+    pub fn remove_tips(&mut self, length: usize, num_reads: usize, keep: bool, c: usize) {
+        self.remove_tips_internal(length, num_reads, keep, c);
         self.re_unitig();
     }
 
@@ -2875,7 +2978,7 @@ impl UnitigGraph {
                 "u{} u{}, cut:{} safe:{} snp_share:{}, snp_diff:{}, ol_length:{}, ol_score:{}, specific_score:{}, sr_safe:{}",
                 uni1.node_id,
                 uni2.node_id,
-                is_cut, 
+                is_cut,
                 safe,
                 edge.overlap.shared_snpmers,
                 edge.overlap.diff_snpmers,
@@ -3662,6 +3765,9 @@ mod tests {
                     diff_snpmers: 0,
                     shared_snpmers: 10,
                     large_indel: false,
+                    // No differing SNPmers => perfect over the whole overlap.
+                    max_perfect_overlap1: 1000,
+                    max_perfect_overlap2: 1000,
                 };
                 internal_overlaps.push(generic_internal_overlap);
             }
@@ -3744,6 +3850,9 @@ mod tests {
                     diff_snpmers: 0,
                     shared_snpmers: 10,
                     large_indel: false,
+                    // No differing SNPmers => perfect over the whole overlap.
+                    max_perfect_overlap1: overlap_len,
+                    max_perfect_overlap2: overlap_len,
                 },
                 from_read_idx,
                 to_read_idx,
@@ -3784,6 +3893,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_gfa_links_include_overlap_metadata() {
+        let mut builder = MockUnitigBuilder::new();
+        let from = builder.add_node(1, 10.);
+        let to = builder.add_node(1, 10.);
+        let edge_id = builder.add_edge(from, to, 1234, true, true);
+        builder.corresponding_reads[0].id = "SRR918238.READ001 description".to_string();
+        builder.corresponding_reads[1].id = "SRR918238.READ002 description".to_string();
+
+        let edge = builder.edges[edge_id].as_mut().unwrap();
+        edge.overlap.shared_minimizers = 100;
+        edge.overlap.shared_snpmers = 23;
+        edge.overlap.diff_snpmers = 9;
+
+        let (mut graph, reads) = builder.build();
+        let args = get_reasonable_args();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let gfa_path = temp_dir.path().join("graph.gfa");
+        graph.to_gfa(&gfa_path, false, false, &reads, &args);
+
+        let gfa = std::fs::read_to_string(gfa_path).unwrap();
+        let link = gfa.lines().find(|line| line.starts_with("L\t")).unwrap();
+        assert_eq!(
+            link,
+            "L\tu0ctg\t+\tu1ctg\t+\t0M\tol:i:1234\tsd:i:9\tss:i:23\tsm:i:100\tfs:f:99.010\tr1:Z:SRR918238.READ001\tr2:Z:SRR918238.READ002"
+        );
+    }
+
+    const TEST_COMPRESSION_FACTOR: usize = 10;
+
     // Test tip removal
     #[test]
     fn test_remove_tips() {
@@ -3797,16 +3936,110 @@ mod tests {
         let n2 = builder.add_node(10, 10.0);
         let n4 = builder.add_node(1, 5.0); // tip node
 
-        builder.add_edge(n1, n2, 100, true, true);
+        builder.add_edge(n1, n2, 400, true, true);
         builder.add_edge(n1, n4, 100, true, true);
 
         let (mut graph, _reads) = builder.build();
         assert!(graph.nodes.len() == 3);
 
         // Remove tips
-        graph.remove_tips_internal(500, 2, false);
+        graph.remove_tips_internal(500, 2, false, TEST_COMPRESSION_FACTOR);
         assert!(graph.nodes.len() == 2);
         assert!(!graph.nodes.contains_key(&n4));
+    }
+
+    #[test]
+    #[ignore = "competitive-tip preservation is gated off; re-enable the gate in remove_tips_internal to run this"]
+    fn test_preserve_tip_with_competitive_overlap_and_fsv() {
+        let mut builder = MockUnitigBuilder::new();
+        let junction = builder.add_node(10, 10.0);
+        let main = builder.add_node(10, 10.0);
+        let tip = builder.add_node(1, 5.0);
+
+        builder.add_edge(junction, main, 400, true, true);
+        builder.add_edge(junction, tip, 1600, true, true);
+
+        let (mut graph, _reads) = builder.build();
+        graph.remove_tips_internal(500, 2, false, TEST_COMPRESSION_FACTOR);
+
+        assert!(graph.nodes.contains_key(&tip));
+    }
+
+    #[test]
+    fn test_remove_tip_with_lower_fsv() {
+        let mut builder = MockUnitigBuilder::new();
+        let junction = builder.add_node(10, 10.0);
+        let main = builder.add_node(10, 10.0);
+        let tip = builder.add_node(1, 5.0);
+
+        let main_edge = builder.add_edge(junction, main, 400, true, true);
+        let tip_edge = builder.add_edge(junction, tip, 1600, true, true);
+        builder.edges[main_edge]
+            .as_mut()
+            .unwrap()
+            .overlap
+            .shared_minimizers = 100;
+        builder.edges[tip_edge]
+            .as_mut()
+            .unwrap()
+            .overlap
+            .shared_minimizers = 100;
+        builder.edges[tip_edge]
+            .as_mut()
+            .unwrap()
+            .overlap
+            .diff_snpmers = 10;
+
+        let (mut graph, _reads) = builder.build();
+        graph.remove_tips_internal(500, 2, false, TEST_COMPRESSION_FACTOR);
+
+        assert!(!graph.nodes.contains_key(&tip));
+    }
+
+    #[test]
+    #[ignore = "competitive-tip preservation is gated off; re-enable the gate in remove_tips_internal to run this"]
+    fn test_preserve_tip_at_incoming_junction() {
+        let mut builder = MockUnitigBuilder::new();
+        let junction = builder.add_node(10, 10.0);
+        let main = builder.add_node(10, 10.0);
+        let tip = builder.add_node(1, 5.0);
+
+        builder.add_edge(main, junction, 400, true, true);
+        builder.add_edge(tip, junction, 1600, true, true);
+
+        let (mut graph, _reads) = builder.build();
+        graph.remove_tips_internal(500, 2, false, TEST_COMPRESSION_FACTOR);
+
+        assert!(graph.nodes.contains_key(&tip));
+    }
+
+    #[test]
+    fn test_remove_tip_without_competing_edge() {
+        let mut builder = MockUnitigBuilder::new();
+        let main = builder.add_node(10, 10.0);
+        let tip = builder.add_node(1, 5.0);
+        builder.add_edge(main, tip, 500, true, true);
+
+        let (mut graph, _reads) = builder.build();
+        graph.remove_tips_internal(500, 2, false, TEST_COMPRESSION_FACTOR);
+
+        assert!(!graph.nodes.contains_key(&tip));
+    }
+
+    #[test]
+    fn test_remove_tip_without_overwhelming_overlap() {
+        let mut builder = MockUnitigBuilder::new();
+        let junction = builder.add_node(10, 10.0);
+        let main = builder.add_node(10, 10.0);
+        let tip = builder.add_node(1, 5.0);
+
+        builder.add_edge(junction, main, 6000, true, true);
+        builder.add_edge(junction, tip, 8000, true, true);
+
+        let (mut graph, _reads) = builder.build();
+        graph.remove_tips_internal(10_000, 2, false, TEST_COMPRESSION_FACTOR);
+
+        assert!(!graph.nodes.contains_key(&tip));
     }
 
     #[test]

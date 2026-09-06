@@ -13,6 +13,9 @@ use fxhash::FxHashSet;
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -277,6 +280,107 @@ pub fn split_kmer(kmer: u64, k: usize) -> (u64, u8) {
     return (masked_kmer, mid_base as u8);
 }
 
+// Informational only: dump the k-mer count distribution and where the high-frequency
+// cutoff landed on it, so the threshold can be sanity-checked against a dataset's actual
+// depth. Never fatal -- a failure here just warns.
+//
+// Note the counts seen here are already post-filtering: k-mers with total count <= 2 or
+// with single-strand support only were dropped during counting, so the low-count error
+// tail is NOT represented. Bins start wherever the surviving data starts.
+fn write_kmer_count_histogram(sorted_counts: &[u32], high_freq_thresh: u32, args: &Cli) {
+    let n_total = sorted_counts.len();
+    if n_total == 0 {
+        return;
+    }
+
+    let out_dir = Path::new(&args.output_dir).join("misc");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        log::warn!("Could not create {:?} for k-mer histogram: {}", out_dir, e);
+        return;
+    }
+    let path = out_dir.join("kmer_count_histogram.tsv");
+
+    // Exact bins for small counts, doubling bins above that.
+    let max_count = *sorted_counts.last().unwrap() as u64;
+    let mut edges: Vec<u64> = (1..100).collect();
+    let mut edge = 100u64;
+    while edge <= max_count {
+        edges.push(edge);
+        edge *= 2;
+    }
+    edges.push(max_count + 1);
+
+    // The quantile before the .max(100) floor is applied, so it is visible whether the
+    // floor or the quantile actually governed the cutoff.
+    let quantile_thresh =
+        sorted_counts[n_total - (n_total / args.high_freq_kmer_threshold) - 1];
+    // Masking uses a strict >, so ties at the threshold survive.
+    let n_masked = n_total - sorted_counts.partition_point(|&c| c <= high_freq_thresh);
+    let total_occ: u64 = sorted_counts.iter().map(|&c| c as u64).sum();
+    let masked_occ: u64 = sorted_counts[n_total - n_masked..]
+        .iter()
+        .map(|&c| c as u64)
+        .sum();
+
+    match File::create(&path) {
+        Ok(f) => {
+            let mut w = BufWriter::new(f);
+            let _ = writeln!(w, "# n_distinct_kmers\t{}", n_total);
+            let _ = writeln!(w, "# min_count\t{}", sorted_counts[0]);
+            let _ = writeln!(w, "# max_count\t{}", max_count);
+            let _ = writeln!(
+                w,
+                "# high_freq_kmer_threshold_arg\t{}",
+                args.high_freq_kmer_threshold
+            );
+            let _ = writeln!(w, "# high_freq_thresh_quantile\t{}", quantile_thresh);
+            let _ = writeln!(w, "# high_freq_thresh_applied\t{}", high_freq_thresh);
+            let _ = writeln!(w, "# floor_100_was_binding\t{}", quantile_thresh < 100);
+            let _ = writeln!(w, "# n_kmers_masked\t{}", n_masked);
+            let _ = writeln!(
+                w,
+                "# frac_occurrences_masked\t{:.6}",
+                masked_occ as f64 / total_occ as f64
+            );
+            let _ = writeln!(
+                w,
+                "count_lo\tcount_hi\tn_kmers\tfrac_kmers\tcum_frac_kmers\toccurrences"
+            );
+
+            // Single pass over the sorted counts; empty bins are skipped.
+            let mut idx = 0usize;
+            let mut cumulative = 0usize;
+            for bin in 0..edges.len() - 1 {
+                let lo = edges[bin];
+                let hi = edges[bin + 1] - 1;
+                let mut n = 0usize;
+                let mut occurrences = 0u64;
+                while idx < n_total && (sorted_counts[idx] as u64) <= hi {
+                    n += 1;
+                    occurrences += sorted_counts[idx] as u64;
+                    idx += 1;
+                }
+                if n == 0 {
+                    continue;
+                }
+                cumulative += n;
+                let _ = writeln!(
+                    w,
+                    "{}\t{}\t{}\t{:.6}\t{:.6}\t{}",
+                    lo,
+                    hi,
+                    n,
+                    n as f64 / n_total as f64,
+                    cumulative as f64 / n_total as f64,
+                    occurrences
+                );
+            }
+            log::debug!("Wrote k-mer count histogram to {:?}", path);
+        }
+        Err(e) => log::warn!("Could not write k-mer histogram to {:?}: {}", path, e),
+    }
+}
+
 pub fn get_snpmers_inplace_sort(
     mut big_kmer_map: Vec<(Kmer64, [u32; 2])>,
     k: usize,
@@ -311,6 +415,7 @@ pub fn get_snpmers_inplace_sort(
         [kmer_counts.len() - (kmer_counts.len() / args.high_freq_kmer_threshold) - 1]
         .max(100);
     log::debug!("High frequency k-mer threshold: {}", high_freq_thresh);
+    write_kmer_count_histogram(&kmer_counts, high_freq_thresh, args);
     drop(kmer_counts);
 
     log::info!("Finding snpmers...");

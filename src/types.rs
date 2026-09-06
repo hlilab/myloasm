@@ -1247,6 +1247,12 @@ pub struct TwinOverlap {
     pub shared_snpmers: usize,
     pub snpmers_in_both: (usize, usize),
     pub diff_snpmers: usize,
+    // perfect-prefix-dominance: positional extent of the differing SNPmers within the
+    // overlap, in each read's own coordinate frame. None means no differing SNPmers.
+    pub min_diff_pos1: Option<usize>,
+    pub max_diff_pos1: Option<usize>,
+    pub min_diff_pos2: Option<usize>,
+    pub max_diff_pos2: Option<usize>,
     pub chain_reverse: bool,
     pub chain_score: i32,
     pub large_indel: bool,

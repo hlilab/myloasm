@@ -1,3 +1,23 @@
+# v0.7.0 (9-4-2026) - Length-aware overlap pruning, cleaning parameter changes
+
+- Added "perfect-prefix dominance" to `prune_lax_overlaps`. Overlaps now carry
+  `max_perfect_overlap1/2`: the diff-free stretch of the overlap measured inward from each
+  read's junction end. A 0-diff neighbouring overlap now only counts as dominating a lax
+  overlap if it actually extends past that overlap's diff-free stretch. Previously a short
+  perfect overlap could dominate a much longer one whose differences all fell outside the
+  short one's span, since FSV alone does not account for overlap length.
+- Disabled competitive-tip preservation. It helped in isolation but cost quality once
+  combined with the other cleaning changes below.
+- Output a k-mer count histogram to `misc/kmer_count_histogram.tsv` (informational).
+  Includes the high-frequency cutoff actually applied and whether the hardcoded floor of
+  100 was binding, so the threshold can be sanity-checked against a dataset's depth.
+
+# v0.6.1 (X-XX-2026)
+- Changed light cleaning step to be a bit more aggressive
+- TODO changing tip cleaning parameters in heavy cleaning step to be less aggressive
+- Changed tip removal order; Tips are causing lots of errors due to being a non-safe graph cleaning method.
+- Made gfa outputs have more descriptive edges 
+
 # v0.6.0 (7-1-2026) - Fixing homopolymer issues, parameter tweaking, abPOA implementation, and slight fix for highly recombinant + high-cov genomes
 
 - Added homopolymer compression during polishing for stretches with > 10 homopolymers. This fixes some issues during eukaryotic polishing. 

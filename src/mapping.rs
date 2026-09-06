@@ -1036,6 +1036,13 @@ pub fn compare_twin_reads(
         let mut shared_snpmer = usize::MAX;
         let mut diff_snpmer = usize::MAX;
 
+        // perfect-prefix-dominance: track where the differing SNPmers sit so we can
+        // later measure the diff-free stretch inward from each read's junction end.
+        let mut min_diff_pos1: Option<usize> = None;
+        let mut max_diff_pos1: Option<usize> = None;
+        let mut min_diff_pos2: Option<usize> = None;
+        let mut max_diff_pos2: Option<usize> = None;
+
         if options.compare_snpmers {
             shared_snpmer = 0;
             diff_snpmer = 0;
@@ -1141,6 +1148,16 @@ pub fn compare_twin_reads(
                             shared_snpmer += 1;
                         } else {
                             diff_snpmer += 1;
+                            let p1 = snpmer_kmers_seq1[i as usize].0 as usize;
+                            let p2 = snpmer_kmers_seq2[j as usize].0 as usize;
+                            min_diff_pos1 =
+                                Some(min_diff_pos1.map_or(p1, |v: usize| v.min(p1)));
+                            max_diff_pos1 =
+                                Some(max_diff_pos1.map_or(p1, |v: usize| v.max(p1)));
+                            min_diff_pos2 =
+                                Some(min_diff_pos2.map_or(p2, |v: usize| v.min(p2)));
+                            max_diff_pos2 =
+                                Some(max_diff_pos2.map_or(p2, |v: usize| v.max(p2)));
                         }
                     }
                 }
@@ -1215,6 +1232,10 @@ pub fn compare_twin_reads(
             shared_minimizers,
             shared_snpmers: shared_snpmer,
             diff_snpmers: diff_snpmer,
+            min_diff_pos1,
+            max_diff_pos1,
+            min_diff_pos2,
+            max_diff_pos2,
             snpmers_in_both: (seq1.snpmer_count(), seq2.snpmer_count()),
             chain_reverse: mini_chain_info.reverse,
             chain_score: mini_chain_info.score,

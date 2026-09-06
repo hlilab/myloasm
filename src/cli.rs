@@ -181,9 +181,18 @@ pub struct Cli {
     #[arg(long, default_value_t = 20000, help_heading = CLI_HEADINGS[4], hide = true)]
     pub tip_length_cutoff: usize,
 
+
+    /// Base length of tip to remove during heavy simplification;
+    #[arg(long, default_value_t = 100000, help_heading = CLI_HEADINGS[4], hide = true)]
+    pub tip_length_cutoff_heavy: usize,
+
     /// Number of reads in tips to remove; this gets multiplied by 5-30x during simplification
     #[arg(long, default_value_t = 3, help_heading = CLI_HEADINGS[4], hide = true)]
     pub tip_read_cutoff: usize,
+
+    /// Number of reads in tips to remove during heavy simplification
+    #[arg(long, default_value_t = 5, help_heading = CLI_HEADINGS[4], hide = true)]
+    pub tip_read_cutoff_heavy: usize,
 
     // ------ HIDDEN ARGUMENTS -----
     /// K-mer size (must be odd and < 24)

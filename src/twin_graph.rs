@@ -35,6 +35,10 @@ pub struct OverlapConfig {
     pub shared_snpmer: usize,
     pub contained: bool,
     pub large_indel: bool,
+    // perfect-prefix-dominance: length of the diff-free stretch of the overlap measured
+    // inward from each read's junction end (the end the edge extends from).
+    pub max_perfect_overlap1: usize,
+    pub max_perfect_overlap2: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Hash, Eq)]
@@ -146,6 +150,10 @@ pub struct ReadOverlapEdgeTwin {
     pub diff_snpmers: usize,
     pub shared_snpmers: usize,
     pub large_indel: bool,
+    // perfect-prefix-dominance: length of the diff-free stretch of the overlap measured
+    // inward from each read's junction end (the end the edge extends from).
+    pub max_perfect_overlap1: usize,
+    pub max_perfect_overlap2: usize,
 }
 
 impl GraphEdge for ReadOverlapEdgeTwin {
@@ -450,11 +458,20 @@ impl OverlapTwinGraph {
                             short_relative_to_good1 = true;
                         }
 
+                        // perfect-prefix-dominance: a 0-diff "good" edge only really
+                        // dominates if it reaches past the candidate's own diff-free
+                        // stretch. Otherwise its higher identity is an artifact of it
+                        // being shorter -- the candidate is equally clean over that span.
+                        let dominates = edge_new.diff_snpmers > 0
+                            || edge_new.overlap_len_bases > edge.max_perfect_overlap1;
+
                         // ~99.6% fsv -> 1.58 = log(3), 99.5% fsv -> 2 = log(4), 99% fsv -> 4 -> log(16). Minimum ratio = 1/3 -> log2(3) ~ 1.58
-                        if (edge.overlap_len_bases as f64 / edge_new.overlap_len_bases as f64)
-                            .log2()
-                            < (400. * (1.0 - edge_new.edge_id_est(c))).max(1.58)
-                            || true
+                        if dominates
+                            && ((edge.overlap_len_bases as f64
+                                / edge_new.overlap_len_bases as f64)
+                                .log2()
+                                < (400. * (1.0 - edge_new.edge_id_est(c))).max(1.58)
+                                || true)
                         {
                             node1_good_found = true;
                         }
@@ -469,10 +486,17 @@ impl OverlapTwinGraph {
                         if edge.overlap_len_bases < edge_new.overlap_len_bases * 3 / 2 {
                             short_relative_to_good2 = true;
                         }
-                        if (edge.overlap_len_bases as f64 / edge_new.overlap_len_bases as f64)
-                            .log2()
-                            < (400. * (1.0 - edge_new.edge_id_est(c))).max(1.58)
-                            || true
+
+                        // perfect-prefix-dominance, node2 side (see node1 above).
+                        let dominates = edge_new.diff_snpmers > 0
+                            || edge_new.overlap_len_bases > edge.max_perfect_overlap2;
+
+                        if dominates
+                            && ((edge.overlap_len_bases as f64
+                                / edge_new.overlap_len_bases as f64)
+                                .log2()
+                                < (400. * (1.0 - edge_new.edge_id_est(c))).max(1.58)
+                                || true)
                         {
                             node2_good_found = true;
                         }
@@ -895,7 +919,11 @@ pub fn get_overlaps_outer_reads_twin(
                             shared_snpmer: twlap.shared_snpmers,
                             diff_snpmer: twlap.diff_snpmers,
                             contained: true,
-                            large_indel: twlap.large_indel
+                            large_indel: twlap.large_indel,
+                            // Contained overlaps are dropped before the graph is built,
+                            // so they never reach the perfect-prefix-dominance check.
+                            max_perfect_overlap1: 0,
+                            max_perfect_overlap2: 0,
                         };
                         log::trace!("Contained read {} in read {}", twlap.i2, twlap.i1);
                         overlaps.lock().unwrap().push(contained_overlap_config);
@@ -1035,6 +1063,23 @@ where
         return None;
     }
 
+    // perfect-prefix-dominance: the diff-free stretch of the overlap, measured inward
+    // from each end. Which end is the junction depends on the orientation case below,
+    // so compute both possibilities per read and pick per case.
+    // No differing SNPmers => the whole overlap is perfect.
+    let perfect1_from_start = twlap
+        .min_diff_pos1
+        .map_or(aln_len1, |p| p.saturating_sub(twlap.start1));
+    let perfect1_from_end = twlap
+        .max_diff_pos1
+        .map_or(aln_len1, |p| twlap.end1.saturating_sub(p));
+    let perfect2_from_start = twlap
+        .min_diff_pos2
+        .map_or(aln_len2, |p| p.saturating_sub(twlap.start2));
+    let perfect2_from_end = twlap
+        .max_diff_pos2
+        .map_or(aln_len2, |p| twlap.end2.saturating_sub(p));
+
     let (hang1_start, hang1_end) = read1.overlap_hang_length.unwrap();
     let (hang2_start, hang2_end) = read2.overlap_hang_length.unwrap();
 
@@ -1071,6 +1116,9 @@ where
                 diff_snpmer: twlap.diff_snpmers,
                 contained: false,
                 large_indel: twlap.large_indel,
+                // junctions: read1 at its start, read2 at its start
+                max_perfect_overlap1: perfect1_from_start,
+                max_perfect_overlap2: perfect2_from_start,
             };
             if same_strain_lax {
                 overlap_possibilities.push(ol_config);
@@ -1095,6 +1143,9 @@ where
                 diff_snpmer: twlap.diff_snpmers,
                 contained: false,
                 large_indel: twlap.large_indel,
+                // junctions: read1 at its end, read2 at its end
+                max_perfect_overlap1: perfect1_from_end,
+                max_perfect_overlap2: perfect2_from_end,
             };
             if same_strain_lax {
                 overlap_possibilities.push(ol_config);
@@ -1119,6 +1170,9 @@ where
                 diff_snpmer: twlap.diff_snpmers,
                 contained: false,
                 large_indel: twlap.large_indel,
+                // junctions: read1 at its start, read2 at its end
+                max_perfect_overlap1: perfect1_from_start,
+                max_perfect_overlap2: perfect2_from_end,
             };
             if same_strain_lax {
                 overlap_possibilities.push(ol_config);
@@ -1141,6 +1195,9 @@ where
                 diff_snpmer: twlap.diff_snpmers,
                 contained: false,
                 large_indel: twlap.large_indel,
+                // junctions: read1 at its end, read2 at its start
+                max_perfect_overlap1: perfect1_from_end,
+                max_perfect_overlap2: perfect2_from_start,
             };
             if same_strain_lax {
                 overlap_possibilities.push(ol_config);
@@ -1228,6 +1285,8 @@ pub fn read_graph_from_overlaps_twin(
             diff_snpmers: overlap.diff_snpmer,
             shared_snpmers: overlap.shared_snpmer,
             large_indel: false,
+            max_perfect_overlap1: overlap.max_perfect_overlap1,
+            max_perfect_overlap2: overlap.max_perfect_overlap2,
         };
 
         edges.push(Some(new_read_overlap));
@@ -1795,6 +1854,7 @@ mod tests {
         pub diff_snpmers: usize,
         pub overlap_len_bases: usize,
         pub shared_minimizers: usize,
+        pub max_perfect_overlap: usize,
     }
 
     impl MockEdge {
@@ -1807,6 +1867,10 @@ mod tests {
                 diff_snpmers: 0,
                 overlap_len_bases: 2000,
                 shared_minimizers: 200,
+                // 0 = unspecified. Diff-free edges get their full length derived in
+                // mock_graph_from_edges; tests set this explicitly to exercise the
+                // perfect-prefix-dominance check on edges that do carry diffs.
+                max_perfect_overlap: 0,
             }
         }
     }
@@ -1816,6 +1880,11 @@ mod tests {
         let mut edges = vec![];
 
         for edge in edge_list {
+            let mock_perfect_overlap = if edge.diff_snpmers == 0 {
+                edge.overlap_len_bases
+            } else {
+                edge.max_perfect_overlap
+            };
             let new_edge = ReadOverlapEdgeTwin {
                 node1: edge.i,
                 node2: edge.j,
@@ -1830,6 +1899,11 @@ mod tests {
                 diff_snpmers: edge.diff_snpmers,
                 shared_snpmers: 10,
                 large_indel: false,
+                // A diff-free overlap is perfect over its whole length. With diffs, the
+                // mock carries no positions, so 0 (= "no known perfect stretch") keeps
+                // the perfect-prefix-dominance check inert unless a test sets it.
+                max_perfect_overlap1: mock_perfect_overlap,
+                max_perfect_overlap2: mock_perfect_overlap,
             };
 
             edges.push(Some(new_edge));
@@ -2323,6 +2397,46 @@ mod tests {
         mock_edges1[1].diff_snpmers = 2;
 
         let mut graph = mock_graph_from_edges(mock_edges1);
+        graph.prune_lax_overlaps(8, None, 100., 0., false, None, false);
+        let good_edges = graph.edges.iter().filter(|x| x.is_some()).count();
+
+        assert_eq!(good_edges, 2);
+    }
+
+    #[test]
+    fn test_prune_lax_overlaps_perfect_prefix_dominance() {
+        // 1 --> 2   "good" neighbours are SHORT (2000bp) but diff-free
+        //   ↘ (x)   candidate 1->4 is LONG (6000bp) with diffs, but its first 3000bp
+        // 3 --> 4   are themselves diff-free, so the short neighbours do not really
+        //           dominate it -- they never reach past its perfect stretch.
+        let mut mock_edges = vec![
+            MockEdge::new(1, 2, Outgoing, Incoming),
+            MockEdge::new(1, 4, Outgoing, Incoming),
+            MockEdge::new(3, 4, Outgoing, Incoming),
+        ];
+        mock_edges[1].diff_snpmers = 5;
+        mock_edges[1].overlap_len_bases = 6000;
+        mock_edges[1].max_perfect_overlap = 3000;
+
+        let mut graph = mock_graph_from_edges(mock_edges);
+        graph.prune_lax_overlaps(8, None, 100., 0., false, None, false);
+        let good_edges = graph.edges.iter().filter(|x| x.is_some()).count();
+
+        // Not pruned: the 2000bp neighbours do not exceed the 3000bp perfect stretch.
+        assert_eq!(good_edges, 3);
+
+        // Same graph, but now the candidate's perfect stretch is only 1000bp, so the
+        // 2000bp diff-free neighbours genuinely do dominate it and it is pruned.
+        let mut mock_edges = vec![
+            MockEdge::new(1, 2, Outgoing, Incoming),
+            MockEdge::new(1, 4, Outgoing, Incoming),
+            MockEdge::new(3, 4, Outgoing, Incoming),
+        ];
+        mock_edges[1].diff_snpmers = 5;
+        mock_edges[1].overlap_len_bases = 6000;
+        mock_edges[1].max_perfect_overlap = 1000;
+
+        let mut graph = mock_graph_from_edges(mock_edges);
         graph.prune_lax_overlaps(8, None, 100., 0., false, None, false);
         let good_edges = graph.edges.iter().filter(|x| x.is_some()).count();
 

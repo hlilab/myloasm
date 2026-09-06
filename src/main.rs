@@ -799,9 +799,9 @@ fn light_progressive_cleaning(
         let read_cutoff = args.tip_read_cutoff;
 
         //First iteration, with spurious haplotype edge removal
-        log::debug!("Starting first round of tip removal...");
-        unitig_graph.remove_tips(tip_length_cutoff, read_cutoff, false);
-        log::debug!("Tip removal done");
+        // log::debug!("Starting first round of tip removal...");
+        // unitig_graph.remove_tips(tip_length_cutoff, read_cutoff, false);
+        // log::debug!("Tip removal done");
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
         log::debug!("Starting first round of bubble removal...");
         unitig_graph.pop_bubbles(bubble_length_cutoff, None, false);
@@ -811,7 +811,7 @@ fn light_progressive_cleaning(
         unitig_graph.remove_low_id_haplotype_edges(&args);
         log::debug!("Low identity edge removal doone");
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
-        unitig_graph.remove_tips(tip_length_cutoff, read_cutoff, false);
+        unitig_graph.remove_tips(tip_length_cutoff, read_cutoff, false, args.c);
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
 
         log::debug!("Finished first round of tip/bubble removal. Now iterating...");
@@ -822,7 +822,7 @@ fn light_progressive_cleaning(
         // Remove tips
         loop {
             log::debug!("Loop {} of tip/bubble removal...", { counter });
-            unitig_graph.remove_tips(tip_length_cutoff, read_cutoff, false);
+            unitig_graph.remove_tips(tip_length_cutoff, read_cutoff, false, args.c);
             unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
             //unitig_graph.remove_caps();
             //unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
@@ -876,7 +876,7 @@ fn light_progressive_cleaning(
         // (tip-safety checks) in safely_cut_edge -- treat them as always safe, so only
         // the overlap-ratio/coverage-ratio gate (Condition 2) decides whether to cut.
         let ol_thresh_iter = max_dropcut_thresh / (divider as f64) * iteration as f64;
-        let skip_tip_safety_this_iter = ol_thresh_iter < 0.35;
+        let skip_tip_safety_this_iter = ol_thresh_iter < 0.20;
         unitig_graph.resolve_bridged_repeats(
             &args,
             ol_thresh_iter,
@@ -908,7 +908,7 @@ fn light_progressive_cleaning(
     let mut size_graph = unitig_graph.nodes.len();
     let mut counter = 0;
     loop {
-        unitig_graph.remove_tips(args.tip_length_cutoff, args.tip_read_cutoff, false);
+        unitig_graph.remove_tips(args.tip_length_cutoff, args.tip_read_cutoff, false, args.c);
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
         unitig_graph.pop_bubbles(args.small_bubble_threshold, None, false);
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
@@ -1286,8 +1286,8 @@ fn heavy_clean_with_walk(
 
             let mut counter = 0;
             loop {
-                let tip_length_cutoff_heavy = args.tip_length_cutoff * 5;
-                let tip_read_cutoff_heavy = args.tip_read_cutoff * 5;
+                let tip_length_cutoff_heavy = args.tip_length_cutoff_heavy;
+                let tip_read_cutoff_heavy = args.tip_read_cutoff_heavy;
                 let bubble_threshold_heavy =
                     (args.small_bubble_threshold * multiplier).min(1_000_000);
                 remove_tips_until_stable(
@@ -1307,7 +1307,7 @@ fn heavy_clean_with_walk(
                 let ol_threshold = ol_thresholds[ind];
 
                 unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
-                if counter <= (ol_thresholds.len() - 1) && counter != 0 {
+                if counter <= (ol_thresholds.len() - 1) {
                     unitig_graph.to_gfa(
                         temp_dir.join(format!(
                             "heavy-m{}-t{}-r{}.gfa",
@@ -1536,7 +1536,7 @@ fn remove_tips_until_stable(
     max_attempts: Option<usize>,
     _temp_dir: &PathBuf,
     save_tips: bool,
-    _args: &cli::Cli,
+    args: &cli::Cli,
 ) {
     let get_seq_config = types::GetSequenceInfoConfig::default();
     let mut size_graph = unitig_graph.nodes.len();
@@ -1547,7 +1547,7 @@ fn remove_tips_until_stable(
                 break;
             }
         }
-        unitig_graph.remove_tips(tip_length_cutoff, tip_read_cutoff, save_tips);
+        unitig_graph.remove_tips(tip_length_cutoff, tip_read_cutoff, save_tips, args.c);
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
         unitig_graph.pop_bubbles(max_bubble_threshold, Some(max_bubble_tigs), save_tips);
         unitig_graph.get_sequence_info(&twin_reads, &get_seq_config);
