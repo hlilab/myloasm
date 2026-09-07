@@ -1,3 +1,7 @@
+//! Sequential reader for KMC databases, including the per-strand counter layout written by the
+//! vendored KMC fork (`kmc -sc`, format versions 0x100 / 0x300). Pure Rust, no dependencies.
+//! Kept in sync with the reader in the KMC fork repository (kmc_rust_disk_reader/src/lib.rs).
+
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -15,13 +19,33 @@ pub struct KmcFileInfo {
     pub total_kmers: u64,
     pub both_strands: bool,
     pub kmc_version: u32,
+    /// Number of counters stored per k-mer: 2 for a database built with stranded
+    /// counters (`kmc -sc`), 1 otherwise.
+    pub n_counters: u32,
+    /// Minimal per-strand count the database was built with (stranded counters only).
+    pub min_count_per_strand: u32,
+}
+
+impl KmcFileInfo {
+    /// True if the database stores a separate counter for each strand.
+    #[inline]
+    pub fn is_stranded(&self) -> bool {
+        self.n_counters == 2
+    }
 }
 
 /// A kmer with its count (uses borrowed slice for zero-copy)
 #[derive(Debug)]
 pub struct KmerRecord<'a> {
     pub kmer: &'a [u8],
+    /// Total number of occurrences (`count_fwd + count_rev`).
     pub count: u64,
+    /// Times the k-mer was read as itself. Equals `count` for a database without
+    /// stranded counters.
+    pub count_fwd: u64,
+    /// Times the k-mer was read as its reverse complement. Always 0 for a database
+    /// without stranded counters.
+    pub count_rev: u64,
 }
 
 /// KMC database reader for sequential listing
@@ -100,12 +124,16 @@ impl KmcReader {
         pre_file.read_exact(&mut buf4)?;
         let kmc_version = u32::from_le_bytes(buf4);
 
-        if kmc_version != 0 && kmc_version != 0x200 {
+        // 0x100 / 0x300 are the KMC1 / KMC2 layouts whose suffix records carry a pair
+        // of per-strand counters (forward first, then reverse).
+        if kmc_version != 0 && kmc_version != 0x200 && kmc_version != 0x100 && kmc_version != 0x300
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unsupported KMC version: 0x{:x}", kmc_version),
             ));
         }
+        let is_kmc2 = kmc_version == 0x200 || kmc_version == 0x300;
 
         // Read header offset
         pre_file.seek(SeekFrom::End(-8))?;
@@ -116,10 +144,10 @@ impl KmcReader {
         // Read metadata
         pre_file.seek(SeekFrom::End(-(header_offset + 8)))?;
 
-        let info = if kmc_version == 0x200 {
-            Self::read_kmc2_header(&mut pre_file)?
+        let info = if is_kmc2 {
+            Self::read_kmc2_header(&mut pre_file, kmc_version)?
         } else {
-            Self::read_kmc1_header(&mut pre_file)?
+            Self::read_kmc1_header(&mut pre_file, kmc_version)?
         };
 
         // Calculate derived values
@@ -130,7 +158,7 @@ impl KmcReader {
         };
 
         let suffix_size = (info.kmer_length - info.lut_prefix_length) / 4;
-        let suffix_rec_size = suffix_size + info.counter_size;
+        let suffix_rec_size = suffix_size + info.counter_size * info.n_counters;
 
         let no_of_rows = {
             let total_symbols = info.kmer_length + byte_alignment as u32;
@@ -144,7 +172,7 @@ impl KmcReader {
         // Read prefix LUT
         let prefix_mask = (1u64 << (2 * info.lut_prefix_length)) - 1;
 
-        let (prefix_buf, _signature_map) = if kmc_version == 0x200 {
+        let (prefix_buf, _signature_map) = if is_kmc2 {
             Self::read_kmc2_lut(&mut pre_file, pre_size, &info, header_offset)?
         } else {
             Self::read_kmc1_lut(&mut pre_file, &info)?
@@ -197,7 +225,7 @@ impl KmcReader {
         })
     }
 
-    fn read_kmc1_header(file: &mut File) -> io::Result<KmcFileInfo> {
+    fn read_kmc1_header(file: &mut File, kmc_version: u32) -> io::Result<KmcFileInfo> {
         let mut buf4 = [0u8; 4];
         let mut buf8 = [0u8; 8];
 
@@ -226,9 +254,32 @@ impl KmcReader {
         file.read_exact(&mut both_strands_byte)?;
         let both_strands = both_strands_byte[0] == 0;
 
+        // counter mode: 1 means a pair of per-strand counters, then 2 reserved bytes
+        let mut counter_mode_byte = [0u8; 1];
+        file.read_exact(&mut counter_mode_byte)?;
+        let n_counters = if kmc_version == 0x100 {
+            if counter_mode_byte[0] != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "database claims per-strand counters but the counter mode says otherwise",
+                ));
+            }
+            2
+        } else {
+            1
+        };
+        file.seek(SeekFrom::Current(2))?;
+
         file.read_exact(&mut buf4)?;
         let max_count_hi = u32::from_le_bytes(buf4);
         let max_count = (max_count_hi as u64) << 32 | max_count_lo as u64;
+
+        let min_count_per_strand = if kmc_version == 0x100 {
+            file.read_exact(&mut buf4)?;
+            u32::from_le_bytes(buf4)
+        } else {
+            0
+        };
 
         Ok(KmcFileInfo {
             kmer_length,
@@ -240,11 +291,13 @@ impl KmcReader {
             max_count,
             total_kmers,
             both_strands,
-            kmc_version: 0,
+            kmc_version,
+            n_counters,
+            min_count_per_strand,
         })
     }
 
-    fn read_kmc2_header(file: &mut File) -> io::Result<KmcFileInfo> {
+    fn read_kmc2_header(file: &mut File, kmc_version: u32) -> io::Result<KmcFileInfo> {
         let mut buf4 = [0u8; 4];
         let mut buf8 = [0u8; 8];
 
@@ -276,6 +329,22 @@ impl KmcReader {
         file.read_exact(&mut both_strands_byte)?;
         let both_strands = both_strands_byte[0] == 0;
 
+        let (n_counters, min_count_per_strand) = if kmc_version == 0x300 {
+            // counter mode: 1 means a pair of per-strand counters, then the per-strand cutoff
+            let mut counter_mode_byte = [0u8; 1];
+            file.read_exact(&mut counter_mode_byte)?;
+            if counter_mode_byte[0] != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "database claims per-strand counters but the counter mode says otherwise",
+                ));
+            }
+            file.read_exact(&mut buf4)?;
+            (2, u32::from_le_bytes(buf4))
+        } else {
+            (1, 0)
+        };
+
         Ok(KmcFileInfo {
             kmer_length,
             mode,
@@ -286,7 +355,9 @@ impl KmcReader {
             max_count,
             total_kmers,
             both_strands,
-            kmc_version: 0x200,
+            kmc_version,
+            n_counters,
+            min_count_per_strand,
         })
     }
 
@@ -432,16 +503,26 @@ impl KmcReader {
         }
         self.suffix_buf_pos += self.suffix_size as usize;
 
-        // Read counter
-        let count = if self.info.counter_size == 0 {
-            1u64
+        // Read counter(s): a stranded database stores the forward one first, then the reverse one
+        let (count_fwd, count_rev) = if self.info.counter_size == 0 {
+            (1u64, 0u64)
         } else {
-            let mut count = self.suffix_buf[self.suffix_buf_pos] as u64;
-            for b in 1..self.info.counter_size as usize {
-                count |= (self.suffix_buf[self.suffix_buf_pos + b] as u64) << (8 * b);
+            let counter_size = self.info.counter_size as usize;
+            let mut counts = [0u64; 2];
+            for (c, slot) in counts
+                .iter_mut()
+                .enumerate()
+                .take(self.info.n_counters as usize)
+            {
+                let base = self.suffix_buf_pos + c * counter_size;
+                let mut value = self.suffix_buf[base] as u64;
+                for b in 1..counter_size {
+                    value |= (self.suffix_buf[base + b] as u64) << (8 * b);
+                }
+                *slot = value;
             }
-            self.suffix_buf_pos += self.info.counter_size as usize;
-            count
+            self.suffix_buf_pos += counter_size * self.info.n_counters as usize;
+            (counts[0], counts[1])
         };
 
         // Convert to string in pre-allocated buffer
@@ -451,7 +532,9 @@ impl KmcReader {
 
         Ok(Some(KmerRecord {
             kmer: &self.kmer_str_buf,
-            count,
+            count: count_fwd + count_rev,
+            count_fwd,
+            count_rev,
         }))
     }
 
@@ -508,27 +591,23 @@ impl KmcReader {
         }
     }
 
-    /// Write all kmers directly to a writer (most efficient for dumping)
+    /// Write all kmers directly to a writer (most efficient for dumping).
+    /// A stranded database gets two counter columns: forward, then reverse.
     pub fn write_all<W: Write>(&mut self, mut writer: W) -> io::Result<u64> {
         let mut count = 0u64;
-        let mut line_buf = Vec::with_capacity(self.info.kmer_length as usize + 32);
+        let mut line_buf = Vec::with_capacity(self.info.kmer_length as usize + 48);
+        let stranded = self.info.is_stranded();
 
         while let Some(record) = self.next_kmer()? {
             line_buf.clear();
             line_buf.extend_from_slice(record.kmer);
             line_buf.push(b'\t');
-
-            // Fast integer to string
-            let mut num = record.count;
-            let start = line_buf.len();
-            if num == 0 {
-                line_buf.push(b'0');
+            if stranded {
+                push_u64(&mut line_buf, record.count_fwd);
+                line_buf.push(b'\t');
+                push_u64(&mut line_buf, record.count_rev);
             } else {
-                while num > 0 {
-                    line_buf.push(b'0' + (num % 10) as u8);
-                    num /= 10;
-                }
-                line_buf[start..].reverse();
+                push_u64(&mut line_buf, record.count);
             }
             line_buf.push(b'\n');
 
@@ -537,6 +616,21 @@ impl KmcReader {
         }
         Ok(count)
     }
+}
+
+/// Append the decimal representation of `num` to `out`.
+#[inline]
+pub fn push_u64(out: &mut Vec<u8>, mut num: u64) {
+    let start = out.len();
+    if num == 0 {
+        out.push(b'0');
+        return;
+    }
+    while num > 0 {
+        out.push(b'0' + (num % 10) as u8);
+        num /= 10;
+    }
+    out[start..].reverse();
 }
 
 /// Convenience function to open a database

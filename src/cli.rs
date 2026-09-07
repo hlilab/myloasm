@@ -6,7 +6,7 @@ use crate::constants::{IDENTITY_THRESHOLDS, ID_THRESHOLD_ITERS};
 #[derive(Parser, Debug)]
 #[command(
     name = "myloasm",
-    about = "myloasm - high-resolution metagenomic assembly with noisy long reads. See online documentation for full options. \n\nEXAMPLE (Nanopore R10): myloasm nanopore_reads.fq.gz -o output_directory -t 50\nEXAMPLE (PacBio HiFi): myloasm pacbio_reads.fq.gz -o output_directory -t 50 --hifi",
+    about = "myloasm - high-resolution metagenomic assembly with noisy long reads. See online documentation for full options. \n\nEXAMPLE (Nanopore R10): myloasm nanopore_reads.fq.gz -o output_directory -t 50",
     version,
     author
 )]
@@ -40,6 +40,18 @@ pub struct Cli {
     #[arg(long)]
     pub clean_dir: bool,
 
+    /// Count k-mers with `myloasm-kmc-v1` (installed separately; see https://github.com/bluenote-1577/myloasm-kmc). Faster and uses less RAM than the built-in counter; recommended for large complex metagenomes like soil and sediment datasets.
+    #[arg(long, help_heading = CLI_HEADINGS[1], conflicts_with = "kmc_stranded_db")]
+    pub kmc: bool,
+
+    /// RAM budget in GB for --kmc
+    #[arg(long, default_value_t = 12, help_heading = CLI_HEADINGS[1], value_name = "GB")]
+    pub kmc_ram: usize,
+
+    /// Load k-mer counts from a stranded database made by `myloasm-kmc-v1` instead of counting (same k). Lets a run that died after k-mer counting skip that stage. Standard KMC databases are not accepted.
+    #[arg(long, help_heading = CLI_HEADINGS[1], hide = true, value_name = "PATH")]
+    pub kmc_stranded_db: Option<String>,
+
     /// Compression ratio (1/c k-mers selected).
     #[arg(long, default_value = "11", help_heading = CLI_HEADINGS[1], hide = true)]
     pub c: usize,
@@ -48,10 +60,6 @@ pub struct Cli {
     #[arg(short, long, default_value = None, help_heading = CLI_HEADINGS[1])]
     pub compression: Option<usize>,
 
-
-    /// Use precomputed KMC database at this path for kmer counting. This helps if your run dies during the k-mer counting stage. Must use -b and -k21 for KMC db creation with version v3.
-    #[arg(long, help_heading = CLI_HEADINGS[1], hide = true)]
-    pub kmc_db: Option<String>,
 
     /// Use DFS-based back-safety search in graph cleaning (v2). Default is BFS-based (v1).
     #[arg(long, default_value_t = true, help_heading = CLI_HEADINGS[1], hide = true)]

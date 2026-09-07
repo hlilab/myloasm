@@ -10,6 +10,7 @@ use fxhash::FxHashSet;
 use myloasm::cli;
 use myloasm::constants::*;
 use myloasm::graph::GraphNode;
+use myloasm::kmc;
 use myloasm::kmer_comp;
 use myloasm::map_processing;
 use myloasm::mapping;
@@ -424,6 +425,11 @@ fn initialize_setup(args: &mut cli::Cli) -> PathBuf {
     return output_dir.to_path_buf();
 }
 
+fn exit_with_error<T>(message: String) -> T {
+    log::error!("{}", message);
+    std::process::exit(1);
+}
+
 fn get_kmers_and_snpmers(args: &cli::Cli, output_dir: &PathBuf) -> types::KmerGlobalInfo {
     let saved_input = args.input_files == [MAGIC_EXIST_STRING];
 
@@ -445,21 +451,15 @@ fn get_kmers_and_snpmers(args: &cli::Cli, output_dir: &PathBuf) -> types::KmerGl
         log::info!("Loaded snpmer info from file.");
     } else {
         let start = Instant::now();
-        let big_kmer_map;
-        if args.kmc_db.is_some() {
-            log::info!(
-                "Using precomputed KMC database at {}",
-                args.kmc_db.as_ref().unwrap()
-            );
-            big_kmer_map = seq_parse::read_kmers_from_kmc_db(
-                args.kmer_size,
-                args.threads,
-                args.kmc_db.as_ref().unwrap(),
-                &args,
-            );
+        let big_kmer_map = if let Some(db) = &args.kmc_stranded_db {
+            log::info!("Using precomputed k-mer count database at {}", db);
+            kmc::load::split_kmers_from_db(Path::new(db), args.kmer_size)
+                .unwrap_or_else(exit_with_error)
+        } else if args.kmc {
+            kmc::split_kmers_via_disk_count(args, output_dir).unwrap_or_else(exit_with_error)
         } else {
-            big_kmer_map = seq_parse::read_to_split_kmers(args.kmer_size, args.threads, &args);
-        }
+            seq_parse::read_to_split_kmers(args.kmer_size, args.threads, args)
+        };
         log::info!(
             "Time elapsed in for counting k-mers is: {:?}",
             start.elapsed()
@@ -479,6 +479,11 @@ fn get_kmers_and_snpmers(args: &cli::Cli, output_dir: &PathBuf) -> types::KmerGl
                 &kmer_info,
             )
             .unwrap();
+        }
+        // The database written by --kmc only serves to restart a run that died before this
+        // point; the SNPmer checkpoint replaces it from here on.
+        if args.kmc {
+            kmc::remove_disk_count_db(output_dir);
         }
     }
     return kmer_info;

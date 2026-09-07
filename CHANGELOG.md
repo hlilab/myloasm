@@ -1,21 +1,13 @@
 # v0.7.0 (9-4-2026) - Length-aware overlap pruning, cleaning parameter changes
 
-- Added "perfect-prefix dominance" to `prune_lax_overlaps`. Overlaps now carry
-  `max_perfect_overlap1/2`: the diff-free stretch of the overlap measured inward from each
-  read's junction end. A 0-diff neighbouring overlap now only counts as dominating a lax
-  overlap if it actually extends past that overlap's diff-free stretch. Previously a short
-  perfect overlap could dominate a much longer one whose differences all fell outside the
-  short one's span, since FSV alone does not account for overlap length.
-- Disabled competitive-tip preservation. It helped in isolation but cost quality once
-  combined with the other cleaning changes below.
+- Added `--kmc` to count k-mers with `myloasm-kmc-v1` (installed separately; see https://github.com/bluenote-1577/myloasm-kmc). Uses less memory and is faster than the default in-memory counting with identical results. `--kmc-ram` sets its memory budget. 
+- Renamed `--kmc-db` to `--kmc-stranded-db`; it takes databases produced by `myloasm-kmc-v1` rather than standard KMC databases.
+- Added another condition for cutting edges called "perfect-prefix dominance" prior to unitigging. 
 - Output a k-mer count histogram to `misc/kmer_count_histogram.tsv` (informational).
   Includes the high-frequency cutoff actually applied and whether the hardcoded floor of
   100 was binding, so the threshold can be sanity-checked against a dataset's depth.
-
-# v0.6.1 (X-XX-2026)
 - Changed light cleaning step to be a bit more aggressive
-- TODO changing tip cleaning parameters in heavy cleaning step to be less aggressive
-- Changed tip removal order; Tips are causing lots of errors due to being a non-safe graph cleaning method.
+- Changing tip cleaning parameters in heavy cleaning step to be less aggressive
 - Made gfa outputs have more descriptive edges 
 
 # v0.6.0 (7-1-2026) - Fixing homopolymer issues, parameter tweaking, abPOA implementation, and slight fix for highly recombinant + high-cov genomes

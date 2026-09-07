@@ -55,6 +55,12 @@ pub const CIRC_LAX_STRING: &str = "circular-possibly";
 pub const USE_SOLID_KMERS: bool = false;
 
 pub const MAX_KMER_COUNT_IN_READ: usize = 500;
+
+// A split k-mer is kept for SNPmer detection only if it was seen at least this many times in
+// total and at least this many times on each strand. Shared by the in-memory counter and the
+// on-disk counter (`myloasm-kmc`).
+pub const MIN_SPLIT_KMER_COUNT_TOTAL: u32 = 3;
+pub const MIN_SPLIT_KMER_COUNT_PER_STRAND: u32 = 1;
 pub const MAX_MULTIPLICITY_KMER: usize = MAX_KMER_COUNT_IN_READ;
 pub const QUALITY_SEQ_BIN: usize = 4;
 

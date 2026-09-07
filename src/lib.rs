@@ -1,7 +1,7 @@
 pub mod cli;
 pub mod constants;
 pub mod graph;
-pub mod kmc_reader;
+pub mod kmc;
 pub mod kmer_comp;
 pub mod map_processing;
 pub mod mapping;
