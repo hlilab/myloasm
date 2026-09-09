@@ -2147,7 +2147,7 @@ pub fn map_reads_to_unitigs(
         .sum::<f64>()
         / tr_unitigs.len() as f64;
     log::info!(
-        "Mapping reads to {} unitigs after filtering with mean length {:.2}. ",
+        "Mapping reads to {} unitigs (after filtering) with mean length {:.2}. ",
         tr_unitigs.len(),
         mean_length
     );
