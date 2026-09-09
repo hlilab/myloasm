@@ -144,3 +144,44 @@ jobs:
     - name: Run tests (if available)
       run: cargo test --release --features=neon --no-default-features
       continue-on-error: true
+
+  build-aarch64-linux:
+    name: Build Linux aarch64
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc cmake
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: 1.85.0
+
+    - name: Cache Rust dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-cargo-aarch64-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-aarch64-
+
+    - name: Build myloasm (ARM NEON)
+      run: cargo install --path . --features=neon --no-default-features
+
+    - name: Test myloasm installation
+      run: myloasm -h
+
+    - name: Run tests (if available)
+      run: cargo test --release --features=neon --no-default-features
+      continue-on-error: true

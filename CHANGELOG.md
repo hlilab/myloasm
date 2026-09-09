@@ -1,3 +1,7 @@
+# v0.7.1 (TODO) 
+
+- Fixed an issue for linux-aarch64 compatibility. 
+
 # v0.7.0 (9-4-2026) - Length-aware overlap pruning, cleaning parameter changes
 
 - Added `--kmc` to count k-mers with `myloasm-kmc-v1` (installed separately; see https://github.com/bluenote-1577/myloasm-kmc). Uses less memory and is faster than the default in-memory counting with identical results. `--kmc-ram` sets its memory budget. 
